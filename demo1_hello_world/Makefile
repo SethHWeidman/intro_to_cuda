@@ -22,7 +22,7 @@ else
 LDFLAGS=-L/usr/local/cuda/lib64/ -lcudart
 endif
 NVCC=nvcc
-NVCCFLAGS=-O3 -m64 --gpu-architecture compute_35
+NVCCFLAGS=-O3 -m64 --gpu-architecture compute_89
 
 
 OBJS=$(OBJDIR)/demo1_main.o  $(OBJDIR)/demo1.o
