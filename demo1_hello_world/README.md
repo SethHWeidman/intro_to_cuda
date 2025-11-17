@@ -10,11 +10,12 @@ This sample prints the CUDA device properties and, when supported, the thread/bl
 ## Build
 1. `cd intro_to_cuda/demo1_hello_world`
 2. Clean any prior artifacts: `make clean`
-3. Build the executable: `make`. The Makefile now targets `--gpu-architecture compute_89`, which
-   matches the NVIDIA L4 GPU used for these demos. If you are on different hardware, edit the
-   `NVCCFLAGS` line in the Makefile (or pass your own via `make NVCCFLAGS="..."`) to match your
-   device’s compute capability—see NVIDIA’s [CUDA GPU list](https://developer.nvidia.com/cuda-gpus)
-   for the right values.
+3. Build the executable: `make`. The Makefile now uses `-gencode arch=compute_89,code=sm_89`, which
+   produces native SASS for the NVIDIA L4 GPU and avoids PTX/toolchain mismatches. If you are on
+   different hardware, edit the `NVCCFLAGS` line (or pass your own via
+   `make NVCCFLAGS="-gencode arch=compute_<XY>,code=sm_<XY>"`) to match your device’s compute
+   capability—see NVIDIA’s [CUDA GPU list](https://developer.nvidia.com/cuda-gpus) for the right
+   values.
 
 ## Run
 Execute the binary after a successful build:
@@ -31,6 +32,12 @@ Device 0: NVIDIA L4
    Global mem: 22478 MB
    CUDA Cap:   8.9
 ---------------------------------------------------------
+
+ThreadID 2: I am thread 0 from block 1 
+ThreadID 3: I am thread 1 from block 1 
+ThreadID 0: I am thread 0 from block 0 
+ThreadID 1: I am thread 1 from block 0 
+
 rowID 0 colID 0 blockDim.x 4, blockDim.y 3 gridDim.x 1 gridDim.y 1 numRows 3 numCols 4 myThreadID 0
 rowID 0 colID 1 blockDim.x 4, blockDim.y 3 gridDim.x 1 gridDim.y 1 numRows 3 numCols 4 myThreadID 1
 rowID 0 colID 2 blockDim.x 4, blockDim.y 3 gridDim.x 1 gridDim.y 1 numRows 3 numCols 4 myThreadID 2

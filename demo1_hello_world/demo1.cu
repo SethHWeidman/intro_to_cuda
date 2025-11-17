@@ -14,7 +14,9 @@ __global__ void my_kernel() {
 void my_launcher() {
 
   int numBlocks = 2;
-  int threadsPerBlock = 2; // 10000000
+  // `threadsPerBlock` goes up to 1024; higher values produce "invalid configuration argument" error
+  // and the kernel fails to launch
+  int threadsPerBlock = 2;
   my_kernel<<<numBlocks, threadsPerBlock>>>();
 
   cudaError_t code = cudaGetLastError();
@@ -51,9 +53,8 @@ void my_launcher_2D() {
 
 void printCudaInfo() {
 
-  // print out stats about the GPU in the machine.  Useful if
-  // students want to know what GPU they are running on.
-
+  // print out stats about the GPU in the machine.  Useful if students want to know what GPU they
+  // are running on.
   int deviceCount = 0;
   cudaError_t err = cudaGetDeviceCount(&deviceCount);
 
