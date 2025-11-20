@@ -1,7 +1,10 @@
 // CODE ADAPTED FROM:
 // https://leimao.github.io/blog/CUDA-Matrix-Multiplication/#Matrix-Multiplication-Optimizations
+#include <cmath>
+#include <cstdio>
 #include <iostream>
 #include <random>
+#include <string>
 #include <vector>
 #define BLOCK_DIM 32
 
@@ -84,13 +87,25 @@ __global__ void mm_kernel(T const *A, T const *B, T *C, size_t M, size_t K, size
 template <typename T>
 __global__ void mm_kernel_shared_memory(T const *A, T const *B, T *C, size_t M, size_t K,
                                         size_t N) {
+  // Each block cooperatively loads a BLOCK_DIM x BLOCK_DIM tile from A and B into the on-chip
+  // shared memory below. The block owns a BLOCK_DIM x BLOCK_DIM patch of C, so all 1,024 threads
+  // need the same 32-wide slice along K at the same time; caching that slice of A and B once lets
+  // every thread reuse those tiles for its BLOCK_DIM multiply‑adds into acc_sum instead of
+  // launching 1,024 independent global reads. After a tile is consumed the block advances to the
+  // next K slice, reusing the same shared arrays. This tiling turns K global loads per output into
+  // ~K / BLOCK_DIM loads and massively raises arithmetic intensity.
   __shared__ T A_tile[BLOCK_DIM][BLOCK_DIM];
   __shared__ T B_tile[BLOCK_DIM][BLOCK_DIM];
 
   T acc_sum{0};
 
+  // Sweep across the K dimension in tiles. A 2048-wide dot product is therefore broken into
+  // 2048 / 32 = 64 passes, and each pass multiplies a BLOCK_DIM-wide slice from the current row
+  // of A by the corresponding column slice of B.
   for (size_t tile_idx{0}; tile_idx < ceilf(static_cast<float>(K) / BLOCK_DIM); ++tile_idx) {
     // Fetch A_tile
+    // Every thread loads exactly one element of the current A tile; collectively the block
+    // materializes a BLOCK_DIM x BLOCK_DIM chunk of A in shared memory.
     size_t i{blockIdx.y * blockDim.y + threadIdx.y};
     size_t j{tile_idx * blockDim.x + threadIdx.x};
     if ((i < M) && (j < K)) {
@@ -100,6 +115,7 @@ __global__ void mm_kernel_shared_memory(T const *A, T const *B, T *C, size_t M, 
     }
 
     // Fetch B_tile
+    // Similarly, pull the BLOCK_DIM x BLOCK_DIM slice of B that aligns with the same tile_idx.
     i = tile_idx * blockDim.y + threadIdx.y;
     j = blockIdx.x * blockDim.x + threadIdx.x;
     if ((i < K) && (j < N)) {
@@ -109,8 +125,11 @@ __global__ void mm_kernel_shared_memory(T const *A, T const *B, T *C, size_t M, 
     }
     __syncthreads();
 
-    // Compute product of elements in the tile and add to acc_sum
+    // Compute product of elements in the tile and add to acc_sum (each thread owns its own
+    // accumulator)
     for (size_t k{0}; k < BLOCK_DIM; ++k) {
+      // Because both tiles are cached, each thread can perform BLOCK_DIM multiply‑adds into its own
+      // acc_sum using only register/shared‑memory operands, dramatically cutting global reads.
       acc_sum += A_tile[threadIdx.y][k] * B_tile[k][threadIdx.x];
     }
     __syncthreads();
@@ -122,6 +141,8 @@ __global__ void mm_kernel_shared_memory(T const *A, T const *B, T *C, size_t M, 
   size_t j{blockIdx.x * blockDim.x + threadIdx.x};
 
   if ((i < M) && (j < N)) {
+    // After processing all tiles along K, each thread has accumulated the full dot product that
+    // corresponds to its output cell.
     C[i * N + j] = acc_sum;
   }
 }
@@ -148,77 +169,118 @@ template <typename T> void mm(T const *A, T const *B, T *C, size_t M, size_t K, 
 /******************************************************************************/
 
 int main() {
-  // Problem size
-  const size_t M{1024 * 8}, K{1024 * 8}, N{1024 * 8};
-  // const size_t M{1024}, K{1024}, N{1024};
+  struct TimingEntry {
+    std::string dataset;
+    std::string implementation;
+    double seconds;
+  };
+  enum class ExperimentKind { CpuVsGpu, GpuComparison };
 
-  // Create random data
-  std::vector<float> const A_vec{create_rand_vector<float>(M * K)};
-  std::vector<float> const B_vec{create_rand_vector<float>(K * N)};
-  std::vector<float> C_CPU_vec(M * N);
-  std::vector<float> C_GPU_vec(M * N);
+  auto runGpuKernel = [&](auto launchKernel, const char *label, float *d_C_GPU,
+                          std::vector<float> &host_output) -> double {
+    checkCuda(cudaMemset(d_C_GPU, 0, sizeof(float) * host_output.size()));
 
-  float const *A{A_vec.data()};
-  float const *B{B_vec.data()};
-  float *C_CPU{C_CPU_vec.data()};
-  float *C_GPU{C_GPU_vec.data()};
+    double startTime = CycleTimer::currentSeconds();
+    launchKernel();
+    checkCuda(cudaDeviceSynchronize());
+    double endTime = CycleTimer::currentSeconds();
 
-  // Allocate device buffers
-  float *d_A, *d_B, *d_C_GPU;
-  checkCuda(cudaMalloc(&d_A, sizeof(float) * A_vec.size()));
-  checkCuda(cudaMalloc(&d_B, sizeof(float) * B_vec.size()));
-  checkCuda(cudaMalloc(&d_C_GPU, sizeof(float) * C_GPU_vec.size()));
+    cudaError_t err{cudaGetLastError()};
+    if (err != cudaSuccess) {
+      std::cerr << "CUDA Matrix Multiplication kernel failed to execute (" << label << ")."
+                << std::endl;
+      std::cerr << cudaGetErrorString(err) << std::endl;
+      std::exit(EXIT_FAILURE);
+    }
 
-  // Copy data from host to device.
-  std::cout << "Copying data H->D..." << std::endl;
-  checkCuda(cudaMemcpy(d_A, A, sizeof(float) * A_vec.size(), cudaMemcpyHostToDevice));
-  checkCuda(cudaMemcpy(d_B, B, sizeof(float) * B_vec.size(), cudaMemcpyHostToDevice));
-  std::cout << "Done." << std::endl;
+    checkCuda(cudaMemcpy(host_output.data(), d_C_GPU, sizeof(float) * host_output.size(),
+                         cudaMemcpyDeviceToHost));
+    return endTime - startTime;
+  };
 
-  // Configure threadblock and grid
-  dim3 threads_per_block(BLOCK_DIM, BLOCK_DIM);
-  dim3 blocks_per_grid(1, 1);
-  blocks_per_grid.x = std::ceil(static_cast<double>(N) / static_cast<double>(threads_per_block.x));
-  blocks_per_grid.y = std::ceil(static_cast<double>(M) / static_cast<double>(threads_per_block.y));
+  auto runExperiment = [&](size_t dim, ExperimentKind kind) {
+    const size_t M{dim}, K{dim}, N{dim};
+    std::string datasetLabel = std::to_string(dim) + " x " + std::to_string(dim);
+    std::cout << "\n=== Running experiment for " << datasetLabel << " ===" << std::endl;
 
-  // Launch kernel!
-  std::cout << "(Asynchronously) launching kernel!" << std::endl;
-  double startTime = CycleTimer::currentSeconds();
-  mm_kernel_shared_memory<<<blocks_per_grid, threads_per_block>>>(d_A, d_B, d_C_GPU, M, K, N);
-  double kernelCallEndTime = CycleTimer::currentSeconds();
+    bool includeCpu = (kind == ExperimentKind::CpuVsGpu);
+    bool includeShared = (kind == ExperimentKind::GpuComparison);
 
-  // Synchronize and get errors
-  cudaDeviceSynchronize();
-  double kernelCompleteTime = CycleTimer::currentSeconds();
-  cudaError_t err{cudaGetLastError()};
-  if (err != cudaSuccess) {
-    std::cerr << "CUDA Matrix Multiplication kernel failed to execute." << std::endl;
-    std::cerr << cudaGetErrorString(err) << std::endl;
-    std::exit(EXIT_FAILURE);
-  }
+    std::vector<float> const A_vec{create_rand_vector<float>(M * K)};
+    std::vector<float> const B_vec{create_rand_vector<float>(K * N)};
+    std::vector<float> C_GPU_naive_vec(M * N);
+    std::vector<float> C_GPU_shared_vec;
+    if (includeShared) {
+      C_GPU_shared_vec.resize(M * N);
+    }
+    std::vector<float> C_CPU_vec;
+    float *C_CPU{nullptr};
+    if (includeCpu) {
+      C_CPU_vec.resize(M * N);
+      C_CPU = C_CPU_vec.data();
+    }
 
-  // Copy data from device to host.
-  std::cout << "Copying data D->H..." << std::endl;
-  checkCuda(cudaMemcpy(C_GPU, d_C_GPU, sizeof(float) * C_GPU_vec.size(), cudaMemcpyDeviceToHost));
-  std::cout << "Done." << std::endl;
+    float const *A{A_vec.data()};
+    float const *B{B_vec.data()};
 
-  // Free device buffer.
-  checkCuda(cudaFree(d_A));
-  checkCuda(cudaFree(d_B));
-  checkCuda(cudaFree(d_C_GPU));
+    float *d_A{nullptr}, *d_B{nullptr}, *d_C_GPU{nullptr};
+    checkCuda(cudaMalloc(&d_A, sizeof(float) * A_vec.size()));
+    checkCuda(cudaMalloc(&d_B, sizeof(float) * B_vec.size()));
+    checkCuda(cudaMalloc(&d_C_GPU, sizeof(float) * C_GPU_naive_vec.size()));
 
-  /* Uncomment to check results! */
-  // Run matmul on CPU
-  // std::cout << "Running matmul on the CPU..." << std::endl;
-  // mm(A, B, C_CPU, M, K, N);
-  // std::cout << "Done." << std::endl;
-  // if (allclose<float>(C_CPU_vec, C_GPU_vec, 1e-4))
-  //     std::cout << "Results match!" << std::endl;
-  // else
-  //     std::cout << "Uh oh, results don't match!" << std::endl;
+    checkCuda(cudaMemcpy(d_A, A, sizeof(float) * A_vec.size(), cudaMemcpyHostToDevice));
+    checkCuda(cudaMemcpy(d_B, B, sizeof(float) * B_vec.size(), cudaMemcpyHostToDevice));
 
-  printf("Kernel Call Time       = %.3f\nKernel Completion Time = %.3f \n",
-         kernelCallEndTime - startTime, kernelCompleteTime - startTime);
+    dim3 threads_per_block(BLOCK_DIM, BLOCK_DIM);
+    dim3 blocks_per_grid(1, 1);
+    blocks_per_grid.x = std::ceil(static_cast<double>(N) / threads_per_block.x);
+    blocks_per_grid.y = std::ceil(static_cast<double>(M) / threads_per_block.y);
+
+    std::vector<TimingEntry> dataset_timings;
+
+    std::cout << "Running GPU kernel" << (includeShared ? "s" : "") << "..." << std::endl;
+    double naive_time = runGpuKernel(
+        [&] { mm_kernel<<<blocks_per_grid, threads_per_block>>>(d_A, d_B, d_C_GPU, M, K, N); },
+        "GPU (naive global memory)", d_C_GPU, C_GPU_naive_vec);
+    dataset_timings.push_back({datasetLabel, "GPU (naive global memory)", naive_time});
+
+    if (includeShared) {
+      double shared_time = runGpuKernel(
+          [&] {
+            mm_kernel_shared_memory<<<blocks_per_grid, threads_per_block>>>(d_A, d_B, d_C_GPU, M, K,
+                                                                            N);
+          },
+          "GPU (shared memory tile)", d_C_GPU, C_GPU_shared_vec);
+      dataset_timings.push_back({datasetLabel, "GPU (shared memory tile)", shared_time});
+    }
+
+    if (includeCpu) {
+      std::cout << "Running CPU matmul..." << std::endl;
+      double cpuStart = CycleTimer::currentSeconds();
+      mm<float>(A, B, C_CPU, M, K, N);
+      double cpuEnd = CycleTimer::currentSeconds();
+      dataset_timings.push_back({datasetLabel, "CPU (single-thread)", cpuEnd - cpuStart});
+
+      bool naive_match = allclose<float>(C_CPU_vec, C_GPU_naive_vec, 1e-4);
+      std::cout << "Results check (CPU vs GPU naive): " << (naive_match ? "match" : "DIFFER")
+                << std::endl;
+    }
+    if (includeShared) {
+      bool gpu_match = allclose<float>(C_GPU_naive_vec, C_GPU_shared_vec, 1e-4);
+      std::cout << "Results check (GPU naive vs GPU shared): " << (gpu_match ? "match" : "DIFFER")
+                << std::endl;
+    }
+
+    checkCuda(cudaFree(d_A));
+    checkCuda(cudaFree(d_B));
+    checkCuda(cudaFree(d_C_GPU));
+
+    return dataset_timings;
+  };
+
+  auto smallTimings = runExperiment(1024, ExperimentKind::CpuVsGpu);
+
+  auto largeTimings = runExperiment(8192, ExperimentKind::GpuComparison);
 
   return 0;
 }
