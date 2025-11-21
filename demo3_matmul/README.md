@@ -6,15 +6,13 @@ This demo benchmarks three implementations of square matrix multiplication:
 - A naive GPU kernel that reads every input element directly from global memory.
 - A tiled GPU kernel that cooperatively stages blocks of `A` and `B` into `__shared__` memory.
 
-> **Placeholder for you:** Add a short paragraph here tying this demo back to Demo 1 and Demo 2
-> (e.g., how it combines massive parallelism with shared-memory tiling, what shapes it runs, and
-> what to look for in the timing table).
-
 ## Prerequisites
+
 - CUDA-capable GPU with a driver/toolkit that provides `nvcc` and the CUDA runtime.
 - `make`, `g++`, and permission to compile inside this folder.
 
 ## Build
+
 1. `cd intro_to_cuda/demo3_matmul`
 2. Remove any previous binary: `make clean`
 3. Build the executable: `make`
@@ -25,6 +23,7 @@ This demo benchmarks three implementations of square matrix multiplication:
 > these flags if using a GPU other than an L4.
 
 ## Run
+
 After a successful build, run:
 ```bash
 ./matmul
@@ -47,18 +46,18 @@ make run
 === Running experiment for 1024 x 1024 ===
 Running GPU kernel...
 Running CPU matmul...
-Results check (CPU vs GPU naive): match
+Numeric results check (CPU vs GPU naive): match
 
-Timing summary for 1024 x 1024 (seconds):
+Timing summary for experiment
 Implementation                       Time
 GPU (naive global memory)           0.001
 CPU (single-thread)                 2.742
 
 === Running experiment for 8192 x 8192 ===
 Running GPU kernels...
-Results check (GPU naive vs GPU shared): match
+Numeric results check (GPU naive vs GPU shared): match
 
-Timing summary for 8192 x 8192 (seconds):
+Timing summary for experiment
 Implementation                       Time
 GPU (naive global memory)           0.900
 GPU (shared memory tile)            0.553
