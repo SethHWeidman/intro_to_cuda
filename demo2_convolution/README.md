@@ -11,12 +11,12 @@ float support[]` buffer to reduce reads and writes from global memory / DRAM.
 ## Build
 1. `cd intro_to_cuda/demo2_convolution`
 2. Remove any stale objects: `make clean`
-3. Build the executable: `make`. The Makefile defaults to `-gencode arch=compute_89,code=sm_89`
-   (optimized for NVIDIA L4). If your GPU uses a different compute capability, edit `NVCCFLAGS` or
-   pass your own flags:
-   ```
-   make NVCCFLAGS="-gencode arch=compute_<XY>,code=sm_<XY>"
-   ```
+3. Build the executable: `make`. 
+
+> **Note:** the `-gencode arch=compute_89,code=sm_89` `NVCCFLAGS` argument tells the code to
+> generate PTX and machine code for the Ada Lovelace / L4 GPUs which NVIDIA lists as "Compute
+> Capability 8.9". See [NVIDIA's CUDA GPU list](https://developer.nvidia.com/cuda-gpus). Modify
+> these flags if using a GPU other than an L4.
 
 ## Run
 After a successful build:

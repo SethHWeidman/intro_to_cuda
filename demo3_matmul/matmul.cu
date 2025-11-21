@@ -270,13 +270,13 @@ int main() {
       dataset_timings.push_back({datasetLabel, "CPU (single-thread)", cpuEnd - cpuStart});
 
       bool naive_match = allclose<float>(C_CPU_vec, C_GPU_naive_vec, 1e-4);
-      std::cout << "Results check (CPU vs GPU naive): " << (naive_match ? "match" : "DIFFER")
-                << std::endl;
+      std::cout << "Numeric results check (CPU vs GPU naive): "
+                << (naive_match ? "match" : "DIFFER") << std::endl;
     }
     if (includeShared) {
       bool gpu_match = allclose<float>(C_GPU_naive_vec, C_GPU_shared_vec, 1e-4);
-      std::cout << "Results check (GPU naive vs GPU shared): " << (gpu_match ? "match" : "DIFFER")
-                << std::endl;
+      std::cout << "Numeric results check (GPU naive vs GPU shared): "
+                << (gpu_match ? "match" : "DIFFER") << std::endl;
     }
 
     checkCuda(cudaFree(d_A));
@@ -287,10 +287,10 @@ int main() {
   };
 
   auto smallTimings = runExperiment(1024, ExperimentKind::CpuVsGpu);
-  printTimingTable("Timing summary for 1024 x 1024 (seconds):", smallTimings);
+  printTimingTable("Timing summary for experiment", smallTimings);
 
   auto largeTimings = runExperiment(8192, ExperimentKind::GpuComparison);
-  printTimingTable("Timing summary for 8192 x 8192 (seconds):", largeTimings);
+  printTimingTable("Timing summary for experiment", largeTimings);
 
   return 0;
 }
