@@ -176,6 +176,14 @@ int main() {
   };
   enum class ExperimentKind { CpuVsGpu, GpuComparison };
 
+  auto printTimingTable = [](std::string const &title, std::vector<TimingEntry> const &entries) {
+    std::cout << "\n" << title << std::endl;
+    printf("%-28s %12s\n", "Implementation", "Time");
+    for (auto const &entry : entries) {
+      printf("%-28s %12.3f\n", entry.implementation.c_str(), entry.seconds);
+    }
+  };
+
   auto runGpuKernel = [&](auto launchKernel, const char *label, float *d_C_GPU,
                           std::vector<float> &host_output) -> double {
     checkCuda(cudaMemset(d_C_GPU, 0, sizeof(float) * host_output.size()));
@@ -279,8 +287,10 @@ int main() {
   };
 
   auto smallTimings = runExperiment(1024, ExperimentKind::CpuVsGpu);
+  printTimingTable("Timing summary for 1024 x 1024 (seconds):", smallTimings);
 
   auto largeTimings = runExperiment(8192, ExperimentKind::GpuComparison);
+  printTimingTable("Timing summary for 8192 x 8192 (seconds):", largeTimings);
 
   return 0;
 }
