@@ -6,9 +6,8 @@
 #include <random>
 #include <string>
 #include <vector>
-#define BLOCK_DIM 32
-
 #include "CycleTimer.h"
+#include "matmul_kernels.cuh"
 
 /******************************************************************************/
 /*                               Utilities                                    */
@@ -55,97 +54,6 @@ bool allclose(std::vector<T> const &vec_1, std::vector<T> const &vec_2, T const 
 /*                              Main Functions                                */
 /******************************************************************************/
 
-// Computes C = A * B on the GPU
-// A: M x K
-// B: K x N
-// C: M x N
-template <typename T>
-__global__ void mm_kernel(T const *A, T const *B, T *C, size_t M, size_t K, size_t N) {
-  // 2D block and 2D thread
-  // Each thread computes one cell in C.
-  size_t i{blockIdx.y * blockDim.y + threadIdx.y};
-  size_t j{blockIdx.x * blockDim.x + threadIdx.x};
-
-  // Do not process outside the matrix.
-  if ((i >= M) || (j >= N)) {
-    return;
-  }
-
-  // Dot product "reduction" over K dimension
-  T acc_sum{0};
-  for (size_t k{0}; k < K; ++k) {
-    acc_sum += A[i * K + k] * B[k * N + j];
-  }
-  C[i * N + j] = acc_sum;
-}
-
-// Computes C = A * B on the GPU
-// Uses shared memory to speed up the computation
-// A: M x K
-// B: K x N
-// C: M x N
-template <typename T>
-__global__ void mm_kernel_shared_memory(T const *A, T const *B, T *C, size_t M, size_t K,
-                                        size_t N) {
-  // Each block cooperatively loads a BLOCK_DIM x BLOCK_DIM tile from A and B into the on-chip
-  // shared memory below. The block owns a BLOCK_DIM x BLOCK_DIM patch of C, so all 1,024 threads
-  // need the same 32-wide slice along K at the same time; caching that slice of A and B once lets
-  // every thread reuse those tiles for its BLOCK_DIM multiply‑adds into acc_sum instead of
-  // launching 1,024 independent global reads. After a tile is consumed the block advances to the
-  // next K slice, reusing the same shared arrays. This tiling turns K global loads per output into
-  // ~K / BLOCK_DIM loads and massively raises arithmetic intensity.
-  __shared__ T A_tile[BLOCK_DIM][BLOCK_DIM];
-  __shared__ T B_tile[BLOCK_DIM][BLOCK_DIM];
-
-  T acc_sum{0};
-
-  // Sweep across the K dimension in tiles. A 2048-wide dot product is therefore broken into
-  // 2048 / 32 = 64 passes, and each pass multiplies a BLOCK_DIM-wide slice from the current row
-  // of A by the corresponding column slice of B.
-  for (size_t tile_idx{0}; tile_idx < ceilf(static_cast<float>(K) / BLOCK_DIM); ++tile_idx) {
-    // Fetch A_tile
-    // Every thread loads exactly one element of the current A tile; collectively the block
-    // materializes a BLOCK_DIM x BLOCK_DIM chunk of A in shared memory.
-    size_t i{blockIdx.y * blockDim.y + threadIdx.y};
-    size_t j{tile_idx * blockDim.x + threadIdx.x};
-    if ((i < M) && (j < K)) {
-      A_tile[threadIdx.y][threadIdx.x] = A[i * K + j];
-    } else {
-      A_tile[threadIdx.y][threadIdx.x] = 0;
-    }
-
-    // Fetch B_tile
-    // Similarly, pull the BLOCK_DIM x BLOCK_DIM slice of B that aligns with the same tile_idx.
-    i = tile_idx * blockDim.y + threadIdx.y;
-    j = blockIdx.x * blockDim.x + threadIdx.x;
-    if ((i < K) && (j < N)) {
-      B_tile[threadIdx.y][threadIdx.x] = B[i * N + j];
-    } else {
-      B_tile[threadIdx.y][threadIdx.x] = 0;
-    }
-    __syncthreads();
-
-    // Compute product of elements in the tile and add to acc_sum (each thread owns its own
-    // accumulator)
-    for (size_t k{0}; k < BLOCK_DIM; ++k) {
-      // Because both tiles are cached, each thread can perform BLOCK_DIM multiply‑adds into its own
-      // acc_sum using only register/shared‑memory operands, dramatically cutting global reads.
-      acc_sum += A_tile[threadIdx.y][k] * B_tile[k][threadIdx.x];
-    }
-    __syncthreads();
-  }
-
-  // 2D block and 2D thread
-  // Each thread computes one cell in C.
-  size_t i{blockIdx.y * blockDim.y + threadIdx.y};
-  size_t j{blockIdx.x * blockDim.x + threadIdx.x};
-
-  if ((i < M) && (j < N)) {
-    // After processing all tiles along K, each thread has accumulated the full dot product that
-    // corresponds to its output cell.
-    C[i * N + j] = acc_sum;
-  }
-}
 
 // Computes C = A * B on the CPU
 // A: M x K
